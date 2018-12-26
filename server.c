@@ -1,32 +1,4 @@
-#include <stdio.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <errno.h>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <netdb.h>
-
-#define BUF_SIZE 1024
-
-/**
- * 捕获子进程退出信号，在退出时给出提示信息
- */
-
-void sig_handler( int signo)
-{
-	pid_t pid ;
-	int stat ;
-
-	pid = waitpid( -1, &stat, WNOHANG) ;
-	while( pid > 0)
-	{
-		printf("child process terminated (PID:%ld)\n", (long) getpid()) ;
-		pid = waitpid( -1, &stat, WNOHANG) ;
-	}
-	return ;
-}
+#include "server.h"
 
 int main(int argc, const char *argv[])
 {
@@ -35,7 +7,6 @@ int main(int argc, const char *argv[])
 	int com_fd ;
 	int ret ;
 	int i ;
-	static char recv_buf[BUF_SIZE] ;
 	int len ;
 	int port ;
 	pid_t pid ;
@@ -43,20 +14,11 @@ int main(int argc, const char *argv[])
 	struct sockaddr_in clt_addr ;
 	struct sockaddr_in srv_addr ;
 
-	if( 2 != argc)
-	{
-		printf("Usage: %s port\n", argv[0]) ;
-		return 1 ;
-	}
+	port = POST ;
 
-	/***
-	 *　获得输入端口
-	 */
-	port = atoi( argv[1]) ;
-
-	/**
-	 * 设置信号处理函数，　也可以使用　sigaction 函数
-	 */
+	chdir(WS_ROOT_DIR) ;
+	
+	printf("服务端进程：%d\n", getpid()) ;
 
 	if( signal( SIGCHLD, sig_handler) < 0)
 	{
@@ -64,9 +26,6 @@ int main(int argc, const char *argv[])
 		return 1 ;
 	}
 
-	/**
-	 * 创建套接字　用于服务器的监听
-	 */
 	listen_fd = socket(PF_INET, SOCK_STREAM, 0) ;
 	if( listen_fd < 0)
 	{
@@ -86,10 +45,6 @@ int main(int argc, const char *argv[])
 		close(listen_fd) ;
 		return 1 ;
 	}
-
-	/**
-	 * 监听指定端口，连接5个客户端
-	 */
 	
 	ret = listen(listen_fd, 5) ;
 	if( -1 == ret)
@@ -99,17 +54,12 @@ int main(int argc, const char *argv[])
 		return 1 ;
 	}
 
-	/**
-	 * 对每个连接的客户端创建一个进程，单独与其进行通信
-	 * 首先调用　read　函数读取客户端发送的信息
-	 * 将其转换成大写后发送回客户端
-	 * 当输入　＠　时，程序退出
-	 */
-
 	while(1)
 	{
 		len = sizeof(clt_addr) ;
+		printf_run("等待客户端连接...\n") ;
 		com_fd = accept( listen_fd, (struct sockaddr*)&clt_addr, &len) ;
+		printf_run("有新的客户端连接请求...\n") ;
 		if( com_fd < 0)
 		{
 			if( EINTR == errno)
@@ -129,21 +79,7 @@ int main(int argc, const char *argv[])
 			close(listen_fd) ;
 			return 1 ;
 		}else if( 0 == pid){
-			while( ( len = read(com_fd, recv_buf, BUF_SIZE)) > 0)
-			{
-				printf("Message from client(%d): %s\n", len, recv_buf) ;
-				
-				if( '@' == recv_buf[0]) break ;
-
-				for( i = 0; i < len; i++)
-				{
-					recv_buf[i] = toupper(recv_buf[i]) ;
-				}
-
-				write(com_fd, recv_buf, len) ;
-
-			}
-
+			handle_child_process(com_fd) ;
 			close( com_fd) ;
 			return 0 ;
 		}else{
@@ -151,4 +87,68 @@ int main(int argc, const char *argv[])
 		}
 	}
 	return 0;
+}
+
+void handle_child_process(int client_fd)
+{
+	static char cmd_buf[CMD_BUF_SIZE] ;
+	int len ;
+
+	while(1)
+	{
+		len = read(client_fd, cmd_buf, CMD_BUF_SIZE);
+
+		printf(" [client-%d]\n\t\trecv_buf_len=%d\n\t\trecv_buf=%s\n", getpid(),len, cmd_buf) ;
+
+		if( '@' == cmd_buf[0]) break ;
+		
+		int client_type = CLIENT_TYPE_DEFAULT ;
+		if(0 == strncmp(cmd_buf, CMD_UPLOAD, strlen(CMD_UPLOAD)))
+		{
+			client_type = CLIENT_TYPE_UPLOAD;
+		}else if( 0 == strncmp(cmd_buf, CMD_VERSION, strlen(CMD_VERSION))){
+			client_type = CLIENT_TYPE_VERSION;
+		}else{
+			printf_warn(" unknown client type will close client_fd !\n") ;
+			break;
+		}
+
+		memset( cmd_buf, 0, CMD_BUF_SIZE) ;
+
+		switch(client_type)
+		{
+			case CLIENT_TYPE_UPLOAD:
+				upload_client(client_fd) ;
+				break;
+
+			case CLIENT_TYPE_VERSION:
+				version_client(client_fd) ;
+				break;
+			default:
+				goto default_client ;
+				printf_warn("goto default_client\n") ;
+				break;
+		}
+
+		cmd_respond(client_fd, END_OF_COMMUNICATION) ;
+
+	}
+default_client:
+	printf_warn("结束子进程处理\n") ;
+
+	return ;
+}
+
+void sig_handler( int signo)
+{
+	pid_t pid ;
+	int stat ;
+
+	pid = waitpid( -1, &stat, WNOHANG) ;
+	while( pid > 0)
+	{
+		printf("child process terminated (PID:%ld)\n", (long) getpid()) ;
+		pid = waitpid( -1, &stat, WNOHANG) ;
+	}
+	return ;
 }
